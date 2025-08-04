@@ -1,239 +1,168 @@
 package qupath.ext.draggablelabels;
 
+import java.awt.geom.AffineTransform;
+import java.awt.geom.Point2D;
+import java.util.Map;
+
+import javafx.scene.input.MouseEvent;
 import qupath.lib.gui.viewer.QuPathViewer;
 import qupath.lib.objects.PathObject;
-import qupath.lib.roi.interfaces.ROI;
-import javafx.geometry.Point2D;
-import javafx.scene.input.MouseButton;
-import javafx.scene.input.MouseEvent;
-import javafx.event.EventHandler;
-import javafx.scene.Cursor;
-import javafx.scene.Node;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import java.util.Map;
-import java.util.HashMap;
-import java.util.Collection;
 
 /**
- * Handles mouse events for dragging annotation labels
+ * Handles mouse interactions for dragging annotation labels.
  */
 public class DraggableLabelHandler {
-    
-    private static final Logger logger = LoggerFactory.getLogger(DraggableLabelHandler.class);
-    private static final String OFFSET_X_KEY = "labelOffsetX";
-    private static final String OFFSET_Y_KEY = "labelOffsetY";
-    
-    private final QuPathViewer viewer;
-    private final Map<PathObject, Point2D> labelOffsets = new HashMap<>();
-    
-    // Drag state
-    private PathObject draggingAnnotation = null;
-    private Point2D dragStartPoint = null;
-    private boolean isDragging = false;
-    
-    // Event handlers
-    private EventHandler<MouseEvent> mousePressedHandler;
-    private EventHandler<MouseEvent> mouseDraggedHandler;
-    private EventHandler<MouseEvent> mouseReleasedHandler;
-    
+
+    private static final String OFFSET_X_KEY = "draggable_label_offset_x";
+    private static final String OFFSET_Y_KEY = "draggable_label_offset_y";
+
+    private QuPathViewer viewer;
     private DraggableLabelOverlay overlay;
-    
+    private PathObject draggedObject;
+    private Point2D dragStartPoint;
+    private Point2D initialOffset;
+    private boolean isDragging = false;
+
     public DraggableLabelHandler(QuPathViewer viewer) {
         this.viewer = viewer;
-        initializeEventHandlers();
-        loadOffsetsFromMetadata();
     }
-    
+
     public void setOverlay(DraggableLabelOverlay overlay) {
         this.overlay = overlay;
-        overlay.setLabelOffsets(labelOffsets);
     }
-    
-    private void initializeEventHandlers() {
-        mousePressedHandler = this::handleMousePressed;
-        mouseDraggedHandler = this::handleMouseDragged;
-        mouseReleasedHandler = this::handleMouseReleased;
-    }
-    
+
     public void enable() {
-        Node view = viewer.getView();
-        view.addEventHandler(MouseEvent.MOUSE_PRESSED, mousePressedHandler);
-        view.addEventHandler(MouseEvent.MOUSE_DRAGGED, mouseDraggedHandler);
-        view.addEventHandler(MouseEvent.MOUSE_RELEASED, mouseReleasedHandler);
-    }
-    
-    public void disable() {
-        Node view = viewer.getView();
-        view.removeEventHandler(MouseEvent.MOUSE_PRESSED, mousePressedHandler);
-        view.removeEventHandler(MouseEvent.MOUSE_DRAGGED, mouseDraggedHandler);
-        view.removeEventHandler(MouseEvent.MOUSE_RELEASED, mouseReleasedHandler);
-        
-        // Remove overlay
         if (overlay != null) {
-            viewer.getOverlayOptions().removeOverlay(overlay);
-        }
-        
-        // Reset cursor if dragging
-        if (isDragging) {
-            view.getScene().setCursor(Cursor.DEFAULT);
-            isDragging = false;
-            draggingAnnotation = null;
+            viewer.getCustomOverlayLayers().add(overlay);
+            viewer.getView().addEventHandler(MouseEvent.MOUSE_PRESSED, this::handleMousePressed);
+            viewer.getView().addEventHandler(MouseEvent.MOUSE_DRAGGED, this::handleMouseDragged);
+            viewer.getView().addEventHandler(MouseEvent.MOUSE_RELEASED, this::handleMouseReleased);
         }
     }
-    
-    private void handleMousePressed(MouseEvent e) {
-        if (e.getButton() != MouseButton.PRIMARY) return;
+
+    public void disable() {
+        if (overlay != null) {
+            viewer.getCustomOverlayLayers().remove(overlay);
+            viewer.getView().removeEventHandler(MouseEvent.MOUSE_PRESSED, this::handleMousePressed);
+            viewer.getView().removeEventHandler(MouseEvent.MOUSE_DRAGGED, this::handleMouseDragged);
+            viewer.getView().removeEventHandler(MouseEvent.MOUSE_RELEASED, this::handleMouseReleased);
+        }
+    }
+
+    private void handleMousePressed(MouseEvent event) {
+        if (viewer.getImageData() == null) {
+            return;
+        }
+
+        // Convert mouse coordinates to image coordinates
+        Point2D imagePoint = viewer.componentPointToImagePoint(event.getX(), event.getY(), null, false);
         
-        Point2D canvasPoint = new Point2D(e.getX(), e.getY());
-        PathObject annotation = getAnnotationAtLabelPoint(canvasPoint);
+        // Find the closest annotation
+        PathObject closestObject = findClosestAnnotation(imagePoint);
         
-        if (annotation != null) {
-            draggingAnnotation = annotation;
-            dragStartPoint = canvasPoint;
+        if (closestObject != null && isNearLabel(closestObject, imagePoint)) {
+            draggedObject = closestObject;
+            dragStartPoint = new Point2D.Double(event.getX(), event.getY());
+            initialOffset = getLabelOffset(closestObject);
             isDragging = true;
-            
-            viewer.getView().getScene().setCursor(Cursor.MOVE);
-            e.consume();
-            
-            logger.debug("Started dragging label for: {}", annotation.getDisplayedName());
+            event.consume();
         }
     }
-    
-    private void handleMouseDragged(MouseEvent e) {
-        if (!isDragging || draggingAnnotation == null) return;
-        
-        Point2D currentPoint = new Point2D(e.getX(), e.getY());
-        Point2D delta = currentPoint.subtract(dragStartPoint);
-        
-        // Convert delta to image coordinates to maintain consistency across zoom levels
-        double scale = viewer.getDownsampleFactor();
-        Point2D imageOffset = new Point2D(delta.getX() * scale, delta.getY() * scale);
-        
-        // Update label offset
-        Point2D currentOffset = getLabelOffset(draggingAnnotation);
-        Point2D newOffset = currentOffset.add(imageOffset);
-        setLabelOffset(draggingAnnotation, newOffset);
-        
-        // Update drag start point
-        dragStartPoint = currentPoint;
-        
-        // Trigger repaint
-        viewer.repaint();
-        e.consume();
-    }
-    
-    private void handleMouseReleased(MouseEvent e) {
-        if (isDragging) {
-            logger.debug("Finished dragging label for: {}", 
-                draggingAnnotation != null ? draggingAnnotation.getDisplayedName() : "null");
+
+    private void handleMouseDragged(MouseEvent event) {
+        if (isDragging && draggedObject != null && dragStartPoint != null) {
+            double deltaX = event.getX() - dragStartPoint.getX();
+            double deltaY = event.getY() - dragStartPoint.getY();
             
-            isDragging = false;
-            draggingAnnotation = null;
-            dragStartPoint = null;
+            Point2D newOffset = new Point2D.Double(
+                initialOffset.getX() + deltaX,
+                initialOffset.getY() + deltaY
+            );
             
-            viewer.getView().getScene().setCursor(Cursor.DEFAULT);
+            setLabelOffset(draggedObject, newOffset);
             viewer.repaint();
-            e.consume();
+            event.consume();
         }
     }
-    
-    private PathObject getAnnotationAtLabelPoint(Point2D canvasPoint) {
-        if (viewer.getImageData() == null) return null;
-        
-        Collection<PathObject> annotations = viewer.getImageData().getHierarchy().getAnnotationObjects();
-        
-        for (PathObject annotation : annotations) {
-            if (annotation.getDisplayedName() != null && 
-                !annotation.getDisplayedName().isEmpty() && 
-                isPointOnAnnotationLabel(annotation, canvasPoint)) {
-                return annotation;
-            }
+
+    private void handleMouseReleased(MouseEvent event) {
+        if (isDragging) {
+            isDragging = false;
+            draggedObject = null;
+            dragStartPoint = null;
+            initialOffset = null;
+            event.consume();
         }
-        return null;
     }
-    
-    private boolean isPointOnAnnotationLabel(PathObject annotation, Point2D canvasPoint) {
-        ROI roi = annotation.getROI();
-        if (roi == null) return false;
-        
-        // Get annotation center in image coordinates
+
+    private PathObject findClosestAnnotation(Point2D imagePoint) {
+        if (viewer.getImageData() == null) {
+            return null;
+        }
+
+        return viewer.getImageData().getHierarchy().getObjects(null, PathObject.class)
+                .stream()
+                .filter(obj -> obj.hasROI() && obj.getDisplayedName() != null && !obj.getDisplayedName().isEmpty())
+                .filter(obj -> obj.getROI().contains(imagePoint.getX(), imagePoint.getY()))
+                .findFirst()
+                .orElse(null);
+    }
+
+    private boolean isNearLabel(PathObject pathObject, Point2D imagePoint) {
+        var roi = pathObject.getROI();
         double centerX = roi.getCentroidX();
         double centerY = roi.getCentroidY();
         
-        // Apply label offset
-        Point2D offset = getLabelOffset(annotation);
-        centerX += offset.getX();
-        centerY += offset.getY();
+        // Convert center to component coordinates using viewer's transformation
+        Point2D imageCenter = new Point2D.Double(centerX, centerY);
+        Point2D canvasCenter = viewer.componentPointToImagePoint(imageCenter.getX(), imageCenter.getY(), null, true);
         
-        // Convert to canvas coordinates
-        Point2D canvasCenter = viewer.imagePointToComponentPoint(centerX, centerY, null, false);
-        if (canvasCenter == null) return false;
+        Point2D offset = getLabelOffset(pathObject);
+        double labelX = canvasCenter.getX() + offset.getX();
+        double labelY = canvasCenter.getY() + offset.getY();
         
-        // Estimate text bounds (rough approximation)
-        String displayName = annotation.getDisplayedName();
-        double textWidth = displayName.length() * 8.0; // Rough estimate
-        double textHeight = 12.0;
+        // Convert image point to component coordinates for comparison
+        Point2D componentPoint = viewer.componentPointToImagePoint(imagePoint.getX(), imagePoint.getY(), null, true);
         
-        // Check if click point is within label bounds
-        return canvasPoint.getX() >= canvasCenter.getX() - textWidth/2 &&
-               canvasPoint.getX() <= canvasCenter.getX() + textWidth/2 &&
-               canvasPoint.getY() >= canvasCenter.getY() - textHeight/2 &&
-               canvasPoint.getY() <= canvasCenter.getY() + textHeight/2;
+        // Check if within reasonable distance of label (e.g., 20 pixels)
+        double distance = Math.sqrt(
+            Math.pow(componentPoint.getX() - labelX, 2) + 
+            Math.pow(componentPoint.getY() - labelY, 2)
+        );
+        
+        return distance < 20; // 20 pixel tolerance
     }
-    
-    public Point2D getLabelOffset(PathObject annotation) {
-        return labelOffsets.getOrDefault(annotation, new Point2D(0, 0));
+
+    public Point2D getLabelOffset(PathObject pathObject) {
+        Map<String, String> metadata = pathObject.getMetadata();
+        
+        String offsetXStr = metadata.get(OFFSET_X_KEY);
+        String offsetYStr = metadata.get(OFFSET_Y_KEY);
+        
+        double offsetX = offsetXStr != null ? Double.parseDouble(offsetXStr) : 0.0;
+        double offsetY = offsetYStr != null ? Double.parseDouble(offsetYStr) : 0.0;
+        
+        return new Point2D.Double(offsetX, offsetY);
     }
-    
-    public void setLabelOffset(PathObject annotation, Point2D offset) {
-        labelOffsets.put(annotation, offset);
-        
-        // Store in annotation metadata for persistence
-        annotation.getMetadata().put(OFFSET_X_KEY, offset.getX());
-        annotation.getMetadata().put(OFFSET_Y_KEY, offset.getY());
-        
-        // Update overlay
-        if (overlay != null) {
-            overlay.setLabelOffsets(labelOffsets);
-        }
+
+    public void setLabelOffset(PathObject pathObject, Point2D offset) {
+        pathObject.getMetadata().put(OFFSET_X_KEY, String.valueOf(offset.getX()));
+        pathObject.getMetadata().put(OFFSET_Y_KEY, String.valueOf(offset.getY()));
     }
-    
-    private void loadOffsetsFromMetadata() {
-        if (viewer.getImageData() == null) return;
-        
-        Collection<PathObject> annotations = viewer.getImageData().getHierarchy().getAnnotationObjects();
-        for (PathObject annotation : annotations) {
-            Map<String, Object> metadata = annotation.getMetadata();
-            if (metadata.containsKey(OFFSET_X_KEY) && metadata.containsKey(OFFSET_Y_KEY)) {
-                try {
-                    double x = ((Number) metadata.get(OFFSET_X_KEY)).doubleValue();
-                    double y = ((Number) metadata.get(OFFSET_Y_KEY)).doubleValue();
-                    labelOffsets.put(annotation, new Point2D(x, y));
-                } catch (Exception e) {
-                    logger.warn("Failed to load label offset for annotation: {}", e.getMessage());
-                }
-            }
+
+    public void resetAllLabelPositions() {
+        if (viewer.getImageData() == null) {
+            return;
         }
-    }
-    
-    public void resetAllPositions() {
-        if (viewer.getImageData() == null) return;
+
+        viewer.getImageData().getHierarchy().getObjects(null, PathObject.class)
+                .stream()
+                .filter(obj -> obj.hasROI() && obj.getDisplayedName() != null)
+                .forEach(obj -> {
+                    obj.getMetadata().remove(OFFSET_X_KEY);
+                    obj.getMetadata().remove(OFFSET_Y_KEY);
+                });
         
-        Collection<PathObject> annotations = viewer.getImageData().getHierarchy().getAnnotationObjects();
-        for (PathObject annotation : annotations) {
-            annotation.getMetadata().remove(OFFSET_X_KEY);
-            annotation.getMetadata().remove(OFFSET_Y_KEY);
-        }
-        
-        labelOffsets.clear();
-        if (overlay != null) {
-            overlay.setLabelOffsets(labelOffsets);
-        }
         viewer.repaint();
-    }
-    
-    public boolean isDragging(PathObject annotation) {
-        return isDragging && draggingAnnotation == annotation;
     }
 }

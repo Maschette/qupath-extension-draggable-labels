@@ -1,74 +1,79 @@
 package qupath.ext.draggablelabels;
 
+import javafx.scene.control.Menu;
+import javafx.scene.control.MenuItem;
 import qupath.lib.gui.QuPathGUI;
 import qupath.lib.gui.viewer.QuPathViewer;
-import javafx.geometry.Point2D;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Manager class for handling draggable label functionality
+ * Manager class for the draggable labels functionality.
  */
 public class DraggableLabelsManager {
-    
-    private static final Logger logger = LoggerFactory.getLogger(DraggableLabelsManager.class);
-    private static final Map<QuPathViewer, DraggableLabelHandler> activeHandlers = new ConcurrentHashMap<>();
-    
-    public static void enableDraggableLabels(QuPathGUI qupath) {
-        QuPathViewer viewer = qupath.getViewer();
-        if (viewer == null) {
-            logger.warn("No active viewer found");
-            return;
-        }
-        
-        if (activeHandlers.containsKey(viewer)) {
-            logger.info("Draggable labels already enabled for this viewer");
-            return;
-        }
-        
-        DraggableLabelHandler handler = new DraggableLabelHandler(viewer);
-        handler.enable();
-        activeHandlers.put(viewer, handler);
-        
-        // Add overlay for custom label rendering
-        DraggableLabelOverlay overlay = new DraggableLabelOverlay();
-        viewer.getOverlayOptions().addOverlay(overlay);
-        handler.setOverlay(overlay);
-        
-        logger.info("Draggable labels enabled");
+
+    private QuPathGUI qupath;
+    private DraggableLabelHandler handler;
+    private DraggableLabelOverlay overlay;
+    private boolean isEnabled = false;
+
+    public DraggableLabelsManager(QuPathGUI qupath) {
+        this.qupath = qupath;
     }
-    
-    public static void disableDraggableLabels(QuPathGUI qupath) {
+
+    public void installMenuItems() {
+        Menu extensionsMenu = qupath.getMenu("Extensions", true);
+        Menu draggableLabelsMenu = new Menu("Draggable Labels");
+        
+        MenuItem enableItem = new MenuItem("Enable draggable labels");
+        enableItem.setOnAction(e -> enableDraggableLabels());
+        
+        MenuItem disableItem = new MenuItem("Disable draggable labels");
+        disableItem.setOnAction(e -> disableDraggableLabels());
+        
+        MenuItem resetItem = new MenuItem("Reset all label positions");
+        resetItem.setOnAction(e -> resetAllLabelPositions());
+        
+        draggableLabelsMenu.getItems().addAll(enableItem, disableItem, resetItem);
+        extensionsMenu.getItems().add(draggableLabelsMenu);
+    }
+
+    private void enableDraggableLabels() {
         QuPathViewer viewer = qupath.getViewer();
         if (viewer == null) {
-            logger.warn("No active viewer found");
             return;
         }
-        
-        DraggableLabelHandler handler = activeHandlers.remove(viewer);
-        if (handler != null) {
+
+        if (!isEnabled) {
+            overlay = new DraggableLabelOverlay(viewer.getOverlayOptions());
+            handler = new DraggableLabelHandler(viewer);
+            
+            overlay.setHandler(handler);
+            handler.setOverlay(overlay);
+            
+            viewer.getCustomOverlayLayers().add(overlay);
+            handler.enable();
+            
+            isEnabled = true;
+            viewer.repaint();
+        }
+    }
+
+    private void disableDraggableLabels() {
+        if (isEnabled && handler != null) {
             handler.disable();
-            logger.info("Draggable labels disabled");
-        } else {
-            logger.info("Draggable labels were not enabled for this viewer");
+            QuPathViewer viewer = qupath.getViewer();
+            if (viewer != null && overlay != null) {
+                viewer.getCustomOverlayLayers().remove(overlay);
+                viewer.repaint();
+            }
+            isEnabled = false;
+            handler = null;
+            overlay = null;
         }
     }
-    
-    public static void resetAllLabelPositions(QuPathGUI qupath) {
-        QuPathViewer viewer = qupath.getViewer();
-        if (viewer == null || viewer.getImageData() == null) {
-            logger.warn("No active viewer or image data found");
-            return;
-        }
-        
-        DraggableLabelHandler handler = activeHandlers.get(viewer);
+
+    private void resetAllLabelPositions() {
         if (handler != null) {
-            handler.resetAllPositions();
-            logger.info("All label positions reset");
-        } else {
-            logger.warn("Draggable labels not enabled - cannot reset positions");
+            handler.resetAllLabelPositions();
         }
     }
 }
